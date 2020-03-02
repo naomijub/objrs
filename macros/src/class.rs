@@ -152,13 +152,12 @@ pub fn transform_class(class: Class) -> Result<TokenStream, Diagnostic> {
   let mut field_count: usize = 0;
   let mut field_tokens = quote!();
   let mut force_cxx_construct: bool = false;
-  for (i, (field, attr)) in item.fields.iter_mut().zip(class.ivar_attrs).enumerate() {
+  for (i, (field, ivar)) in item.fields.iter_mut().zip(class.ivars).enumerate() {
     field_count += 1;
     let field_ident: TokenTree =
       field.ident.clone().map_or_else(|| Literal::usize_unsuffixed(i).into(), |ident| ident.into());
 
-    let ivar_ident_str: &str =
-      &attr.name.map_or_else(|| field_ident.to_string(), |lit| lit.value());
+    let ivar_ident_str: &str = &ivar.name.value();
 
     let field_end_ident = crate::util::priv_ident(&format!("FIELD_END_{}", i));
     let unpadded_size_of_ident = crate::util::priv_ident(&format!("UNPADDED_SIZE_OF_{}", i));
@@ -212,7 +211,7 @@ pub fn transform_class(class: Class) -> Result<TokenStream, Diagnostic> {
     }};
 
     if !force_cxx_construct {
-      if attr.default.is_some() {
+      if ivar.default.is_some() {
         force_cxx_construct = true;
         requires_cxx_construct = quote!(true);
       } else {
@@ -225,7 +224,7 @@ pub fn transform_class(class: Class) -> Result<TokenStream, Diagnostic> {
       <#field_ty as #objrs_root::__objrs::RequiresCxxDestruct>::VALUE ||
     });
 
-    if let Some(default) = attr.default {
+    if let Some(default) = ivar.default {
       cxx_construct.extend(quote!{
         #objrs_root::__objrs::Field::construct_with_value(&mut this_and_fields.fields.#field_ident, this_as_u8, #default);
       });

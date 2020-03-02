@@ -77,7 +77,6 @@ impl<'a, T, F: FnMut(&mut T) -> bool> core::iter::Iterator for Drain<'a, T, F> {
 }
 
 impl<T> DrainExt for Vec<T> {
-  #[inline]
   fn drain<'a, F: FnMut(&mut T) -> bool>(&'a mut self, f: F) -> Drain<'a, T, F> {
     let len = self.len();
     unsafe {

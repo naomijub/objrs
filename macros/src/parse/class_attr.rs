@@ -117,7 +117,7 @@ use proc_macro::Diagnostic;
 use proc_macro2::{Span, TokenStream};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{parse2, Field, Ident, ItemStruct, LitStr, TypePath};
+use syn::{parse2, Field, Ident, ItemStruct, LitStr, Expr, TypePath};
 
 pub struct ClassAttr {
   pub class_name: Option<LitStr>,
@@ -201,15 +201,14 @@ impl Parse for ClassAttr {
   }
 }
 
-fn extract_ivar_attr(field: &mut Field, force_extern: bool) -> Result<IvarAttr, Diagnostic> {
+fn extract_ivar_attr(index: usize, field: &mut Field, force_extern: bool) -> Result<Ivar, Diagnostic> {
   let ivar_attr: IvarAttr;
   match take_objrs_attr(&mut field.attrs)? {
     Some(attr) => {
-      // let span = attr.span();
-      ivar_attr = parse2(attr.tokens).unwrap();
-      // ivar_attr = parse2(attr.tokens).map_err(|e| span.unstable().error(e.to_string()))?;
+      let span = attr.span();
+      ivar_attr = parse2(attr.tokens).map_err(|e| span.unstable().error(e.to_string()))?;
     }
-    None => return Ok(IvarAttr::default()),
+    None => ivar_attr = IvarAttr::default(),
   }
 
   if force_extern {
@@ -220,7 +219,22 @@ fn extract_ivar_attr(field: &mut Field, force_extern: bool) -> Result<IvarAttr, 
     }
   }
 
-  return Ok(ivar_attr);
+  let name = ivar_attr.name.unwrap_or_else(|| {
+    match field.ident {
+      Some(ref ident) => return LitStr::new(&ident.to_string(), ident.span()),
+      None => return LitStr::new(&index.to_string(), field.span()),
+    }
+  });
+
+  return Ok(Ivar {
+    name: name,
+    default: ivar_attr.default,
+  });
+}
+
+pub struct Ivar {
+  pub name: LitStr, // TODO: maybe just make this a String...
+  pub default: Option<Expr>,
 }
 
 pub struct Class {
@@ -231,7 +245,7 @@ pub struct Class {
   pub force_extern: bool,
   pub root_class_name: LitStr, // TODO: maybe just make this a String...
   pub item: ItemStruct,
-  pub ivar_attrs: Vec<IvarAttr>,
+  pub ivars: Vec<Ivar>,
 }
 
 impl Class {
@@ -255,9 +269,9 @@ impl Class {
     let class_name =
       attr.class_name.unwrap_or_else(|| LitStr::new(&item.ident.to_string(), item.ident.span()));
 
-    let mut ivar_attrs = Vec::new();
-    for field in item.fields.iter_mut() {
-      ivar_attrs.push(extract_ivar_attr(field, force_extern)?);
+    let mut ivars = Vec::new();
+    for (i, field) in item.fields.iter_mut().enumerate() {
+      ivars.push(extract_ivar_attr(i, field, force_extern)?);
     }
 
     let root_class_name;
@@ -285,7 +299,7 @@ impl Class {
       force_extern: force_extern,
       root_class_name: root_class_name,
       item: item,
-      ivar_attrs: ivar_attrs,
+      ivars: ivars,
     });
   }
 }

@@ -93,8 +93,8 @@ fn requires_cxx_construct(class: &Class) -> TokenStream {
     return quote!(false);
   }
 
-  for ivar_attr in class.ivar_attrs.iter() {
-    if ivar_attr.default.is_some() {
+  for ivar in class.ivars.iter() {
+    if ivar.default.is_some() {
       return quote!(true);
     }
   }
@@ -212,14 +212,8 @@ fn fields_item(class: &Class) -> TokenStream {
 
   let offset_name_prefix: &str = &["OBJC_IVAR_$_", &class.class_name.value(), "."].concat();
   let mut fields_init = TokenStream::new();
-  for (i, (field, attr)) in class.item.fields.iter().zip(class.ivar_attrs.iter()).enumerate() {
-    let offset_export_name;
-    match (&attr.name, &field.ident) {
-      (Some(name), _) => offset_export_name = [offset_name_prefix, &name.value()].concat(),
-      (None, Some(ident)) => offset_export_name = [offset_name_prefix, &ident.to_string()].concat(),
-      (None, None) => offset_export_name = format!("{}{}", offset_name_prefix, i),
-    }
-
+  for (field, ivar) in class.item.fields.iter().zip(class.ivars.iter()) {
+    let offset_export_name = [offset_name_prefix, &ivar.name.value()].concat();
     let ident = &field.ident;
     let colon = &field.colon_token;
     fields_init.extend(quote! {
@@ -287,6 +281,104 @@ fn marker_impls(class: &Class) -> TokenStream {
   }
 
   return impls;
+}
+
+fn ivar_list(class: &Class) -> TokenStream {
+  if class.force_extern {
+    return TokenStream::new();
+  }
+
+  let objrs_root = &class.objrs;
+  let pub_ident = &class.item.ident;
+  let class_name_str = &class.class_name.value();
+
+  let ivar_list_ident = ivar_list_ident(class_name_str);
+  if class.item.fields.is_empty() {
+    return quote! {
+      #[doc(hidden)]
+      const #ivar_list_ident: () = ();
+    };
+  }
+  let ivar_list_ty_ident = ivar_list_ident.clone().resolved_at_def_site();
+
+  let offset_name_prefix = &["OBJC_IVAR_$_", class_name_str, "."].concat();
+  let ivar_name_prefix =
+    &["\x01L_OBJC_METH_VAR_NAME_.__objrs_ivar.", class_name_str, "::"].concat();
+  let ivar_type_prefix =
+    &["\x01L_OBJC_METH_VAR_TYPE_.__objrs_ivar.", class_name_str, "::"].concat();
+
+  let mut field_tokens = TokenStream::new();
+  for (i, (field, ivar)) in class.item.fields.iter().zip(class.ivars.iter()).enumerate() {
+    let ivar_name_str: &str = &ivar.name.value();
+
+    let offset_export_name = [offset_name_prefix, ivar_name_str].concat();
+    let offset = quote! {{
+      // Objective-C marks this as .private_extern in the assembly. I don't think we have a way to
+      // do that in Rust.
+      // TODO: support generics.
+      #[link_section = "__DATA,__objc_ivar"]
+      #[export_name = #offset_export_name]
+      static IVAR_OFFSET: #objrs_root::__objrs::usize = <#pub_ident as #objrs_root::__objrs::Class>::FIELD_OFFSETS[#i];
+      &IVAR_OFFSET as *const _ as *mut _
+    }};
+
+    let field_ty = &field.ty;
+    let ivar_type_export_name = [ivar_type_prefix, ivar_name_str].concat();
+    let encoded_type = quote! {{
+      #[link_section = "__TEXT,__objc_methtype,cstring_literals"]
+      #[export_name = #ivar_type_export_name]
+      static IVAR_TYPE: #objrs_root::__objrs::Packed2<<#field_ty as #objrs_root::__objrs::TypeEncodingHack>::Type, #objrs_root::__objrs::u8> = #objrs_root::__objrs::Packed2(<#field_ty as #objrs_root::__objrs::TypeEncodingHack>::BYTES, b'\x00');
+      unsafe { #objrs_root::__objrs::TransmuteHack::<_, *const #objrs_root::__objrs::u8> { from: &IVAR_TYPE }.to }
+    }};
+
+    let ivar_name_export_name = [ivar_name_prefix, ivar_name_str].concat();
+    let ivar_name = LitByteStr::new([ivar_name_str, "\x00"].concat().as_bytes(), Span::call_site());
+    let ivar_name_len = ivar_name_str.len() + 1;
+    let name = quote! {{
+      #[link_section = "__TEXT,__objc_methname,cstring_literals"]
+      #[export_name = #ivar_name_export_name]
+      static IVAR_NAME: [#objrs_root::__objrs::u8; #ivar_name_len] = *#ivar_name;
+      &IVAR_NAME as *const #objrs_root::__objrs::u8
+    }};
+
+    let pub_ident = &class.item.ident;
+    let field_ty = &field.ty;
+    field_tokens.extend(quote! {
+      #objrs_root::__objrs::runtime::ivar_t {
+        offset: #offset,
+        name: #name as *const _,
+        encoded_type: #encoded_type as *const _,
+        alignment_raw: #objrs_root::__objrs::align_log_2::<#field_ty>(),
+        size: #objrs_root::__objrs::core::mem::size_of::<#field_ty>() as #objrs_root::__objrs::u32,
+      },
+    });
+  }
+
+  let field_count = Literal::usize_unsuffixed(class.item.fields.len());
+  let objrs_root = &class.objrs;
+  let ivar_list_export_name = ["\x01l_OBJC_$_INSTANCE_VARIABLES_", class_name_str].concat();
+  return quote! {
+    // TODO: just make runtime::ivar_list_t take a generic parameter, and pass in [ivar_t; N] for
+    // the generic parameter. Then this struct here can be deleted and field_count can be made a
+    // real u32 instead of being cast to a u32.
+    #[doc(hidden)]
+    #[repr(C)]
+    struct #ivar_list_ty_ident {
+      entsize_and_flags: #objrs_root::__objrs::u32,
+      count: #objrs_root::__objrs::u32,
+      ivars: [#objrs_root::__objrs::runtime::ivar_t; #field_count],
+    }
+    unsafe impl #objrs_root::__objrs::core::marker::Sync for #ivar_list_ty_ident {}
+
+    #[doc(hidden)]
+    #[link_section = "__DATA,__objc_const"]
+    #[export_name = #ivar_list_export_name]
+    static #ivar_list_ident: #ivar_list_ty_ident = #ivar_list_ty_ident {
+      entsize_and_flags: #objrs_root::__objrs::core::mem::size_of::<#objrs_root::__objrs::runtime::ivar_t>() as #objrs_root::__objrs::u32,
+      count: #field_count,
+      ivars: [#field_tokens],
+    };
+  };
 }
 
 #[cfg(test)]
@@ -656,6 +748,109 @@ mod tests {
     let expected = quote! {
       unsafe impl<T> objrs::marker::Class for ClassTy<T> where T: objrs::marker::Class {}
       unsafe impl<T> objrs::marker::RootClass for ClassTy<T> where T: objrs::marker::Class {}
+    };
+    assert_tokens_eq!(actual, expected);
+  }
+
+  #[test]
+  fn ivar_list_extern() {
+    let class = make_class(quote! {
+      #[objrs(class, name = "ClassName", super = SuperTy, extern)]
+      struct ClassTy(u32);
+    });
+
+    let actual = ivar_list(&class);
+    let expected = TokenStream::new();
+    assert_tokens_eq!(actual, expected);
+  }
+
+  #[test]
+  fn ivar_list_empty() {
+    let class = make_class(quote! {
+      #[objrs(class, name = "ClassName", super = SuperTy)]
+      struct ClassTy {
+      }
+    });
+
+    let actual = ivar_list(&class);
+    let expected = quote! {
+      #[doc(hidden)]
+      const __objrs_ivars_ClassName: () = ();
+    };
+    assert_tokens_eq!(actual, expected);
+  }
+
+  #[test]
+  fn ivar_list_item_tuple() {
+    let class = make_class(quote! {
+      #[objrs(class, name = "ClassName", super = SuperTy)]
+      struct ClassTy(u8, u16);
+    });
+
+    let actual = ivar_list(&class);
+    let expected = quote! {
+      #[doc(hidden)]
+      #[repr(C)]
+      struct __objrs_ivars_ClassName {
+        entsize_and_flags: objrs::__objrs::u32,
+        count: objrs::__objrs::u32,
+        ivars: [objrs::__objrs::runtime::ivar_t; 2],
+      }
+      unsafe impl objrs::__objrs::core::marker::Sync for __objrs_ivars_ClassName {}
+
+      #[doc(hidden)]
+      #[link_section = "__DATA,__objc_const"]
+      #[export_name = "\u{1}l_OBJC_$_INSTANCE_VARIABLES_ClassName"]
+      static __objrs_ivars_ClassName: __objrs_ivars_ClassName = __objrs_ivars_ClassName {
+        entsize_and_flags: objrs::__objrs::core::mem::size_of::<objrs::__objrs::runtime::ivar_t>() as objrs::__objrs::u32,
+        count: 2,
+        ivars: [
+          objrs::__objrs::runtime::ivar_t {
+            offset: {
+              #[link_section = "__DATA,__objc_ivar"]
+              #[export_name = "OBJC_IVAR_$_ClassName.0"]
+              static IVAR_OFFSET: objrs::__objrs::usize = <ClassTy as objrs::__objrs::Class>::FIELD_OFFSETS[0usize];
+              &IVAR_OFFSET as *const _ as *mut _
+            },
+            name: {
+              #[link_section = "__TEXT,__objc_methname,cstring_literals"]
+              #[export_name = "\u{1}L_OBJC_METH_VAR_NAME_.__objrs_ivar.ClassName::0"]
+              static IVAR_NAME: [objrs::__objrs::u8; 2usize] = *b"0\0";
+              &IVAR_NAME as *const objrs::__objrs::u8
+            } as *const _,
+            encoded_type: {
+              #[link_section = "__TEXT,__objc_methtype,cstring_literals"]
+              #[export_name = "\u{1}L_OBJC_METH_VAR_TYPE_.__objrs_ivar.ClassName::0"]
+              static IVAR_TYPE: objrs::__objrs::Packed2<<u8 as objrs::__objrs::TypeEncodingHack>::Type, objrs::__objrs::u8> = objrs::__objrs::Packed2(<u8 as objrs::__objrs::TypeEncodingHack>::BYTES, b'\x00');
+              unsafe { objrs::__objrs::TransmuteHack::<_, *const objrs::__objrs::u8> { from: &IVAR_TYPE }.to }
+            } as *const _,
+            alignment_raw: objrs::__objrs::align_log_2::<u8>(),
+            size: objrs::__objrs::core::mem::size_of::<u8>() as objrs::__objrs::u32,
+          },
+          objrs::__objrs::runtime::ivar_t {
+            offset: {
+              #[link_section = "__DATA,__objc_ivar"]
+              #[export_name = "OBJC_IVAR_$_ClassName.1"]
+              static IVAR_OFFSET: objrs::__objrs::usize = <ClassTy as objrs::__objrs::Class>::FIELD_OFFSETS[1usize];
+              &IVAR_OFFSET as *const _ as *mut _
+            },
+            name: {
+              #[link_section = "__TEXT,__objc_methname,cstring_literals"]
+              #[export_name = "\u{1}L_OBJC_METH_VAR_NAME_.__objrs_ivar.ClassName::1"]
+              static IVAR_NAME: [objrs::__objrs::u8; 2usize] = *b"1\0";
+              &IVAR_NAME as *const objrs::__objrs::u8
+            } as *const _,
+            encoded_type: {
+              #[link_section = "__TEXT,__objc_methtype,cstring_literals"]
+              #[export_name = "\u{1}L_OBJC_METH_VAR_TYPE_.__objrs_ivar.ClassName::1"]
+              static IVAR_TYPE: objrs::__objrs::Packed2<<u16 as objrs::__objrs::TypeEncodingHack>::Type, objrs::__objrs::u8> = objrs::__objrs::Packed2(<u16 as objrs::__objrs::TypeEncodingHack>::BYTES, b'\x00');
+              unsafe { objrs::__objrs::TransmuteHack::<_, *const objrs::__objrs::u8> { from: &IVAR_TYPE }.to }
+            } as *const _,
+            alignment_raw: objrs::__objrs::align_log_2::<u16>(),
+            size: objrs::__objrs::core::mem::size_of::<u16>() as objrs::__objrs::u32,
+          },
+        ],
+      };
     };
     assert_tokens_eq!(actual, expected);
   }
