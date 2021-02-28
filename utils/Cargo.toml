@@ -12,4 +12,3 @@ license = "Apache-2.0 OR MIT OR MPL-2.0"
 description = "Common utilies for objrs crates."
 
 [dependencies]
-proc-macro2 = "1"
