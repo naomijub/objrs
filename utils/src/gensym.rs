@@ -5,6 +5,8 @@
 
 extern crate core;
 
+use crate::wyhash::wyhash128;
+
 #[link(name = "c")]
 extern "C" {
   fn arc4random_buf(buf: *mut u8, nbytes: usize);
@@ -34,7 +36,15 @@ impl core::ops::Deref for RandomIdentifier {
 impl RandomIdentifier {
   #[inline]
   pub fn new() -> RandomIdentifier {
-    let uuid = random::<[u64; 2]>();
+    return Self::with_uuid(random::<[u64; 2]>());
+  }
+
+  #[inline]
+  pub fn deterministic(seed: &[u8]) -> RandomIdentifier {
+    return Self::with_uuid(wyhash128(seed));
+  }
+
+  fn with_uuid(uuid: [u64; 2]) -> RandomIdentifier {
     let mask = 0x0f0f0f0f0f0f0f0f;
     let aaaaaaaa = 0x6161616161616161;
     let symbol: [u64; 4] = [
@@ -52,12 +62,51 @@ impl RandomIdentifier {
 mod tests {
   use super::*;
 
+  fn xorshift64(seed: u64) -> u64 {
+    let mut x = seed;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    return x;
+  }
+
   #[test]
   fn test_new() {
     // Make sure we always generate valid ASCII identifiers.
     for _ in 0..100 {
       let ident_str: &str = &RandomIdentifier::new();
       for c in ident_str.bytes() {
+        assert!(c.is_ascii());
+        assert!(c.is_ascii_alphabetic());
+        assert!(b'a' <= c && c <= b'p');
+      }
+    }
+  }
+
+  #[test]
+  fn test_deterministic() {
+    let mut seed: u64 = 0x139408dcbbf7a44;
+    // Make sure we the results are determinstic.
+    for _ in 0..100 {
+      let first: &str = &RandomIdentifier::deterministic(&seed.to_le_bytes());
+      let second: &str = &RandomIdentifier::deterministic(&seed.to_le_bytes());
+      seed = xorshift64(seed);
+      let third: &str = &RandomIdentifier::deterministic(&seed.to_le_bytes());
+      assert_eq!(first, second);
+      assert_ne!(first, third);
+    }
+  }
+
+  #[test]
+  fn test_deterministic_ascii() {
+    let mut seed: u64 = 0x139408dcbbf7a44;
+    // Make sure we always generate valid ASCII identifiers.
+    for _ in 0..100 {
+      let ident_str: &str = &RandomIdentifier::deterministic(&seed.to_le_bytes());
+      seed = xorshift64(seed);
+      for c in ident_str.bytes() {
+        assert!(c.is_ascii());
+        assert!(c.is_ascii_alphabetic());
         assert!(b'a' <= c && c <= b'p');
       }
     }

@@ -4,5 +4,6 @@
 // licenses and more information, see the COPYRIGHT file in this distribution's top-level directory.
 
 mod gensym;
+mod wyhash;
 
 pub use gensym::*;
