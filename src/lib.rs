@@ -9,7 +9,6 @@
   unwind_attributes,
 
   // Features that objrs could live without, but would be inconvenient or result in extra overhead:
-  const_transmute,
   global_asm,
   specialization,
   untagged_unions
